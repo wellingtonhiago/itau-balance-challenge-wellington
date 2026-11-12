@@ -12,7 +12,7 @@ flowchart LR
     L --> U[Atualização do saldo]
     L -- evento inválido --> D[DLT]
     U --> P[Porta de persistência]
-    H[GET /balances/{accountId}] --> C[Controller]
+    H["GET /balances/{accountId}"] --> C[Controller]
     C --> G[Consulta do saldo]
     G --> P
     P --> DB[(DynamoDB)]
