@@ -11,6 +11,9 @@ services:
       GREETING_TABLE_NAME: GreetingMessages
       KAFKA_BOOTSTRAP_SERVERS: redpanda:9092
       GREETING_TEMPLATES_TOPIC: greeting-templates
+      ACCOUNT_BALANCE_TABLE_NAME: AccountBalances
+      TRANSACTIONS_TOPIC: transacoes-financeiras-processadas
+      TRANSACTIONS_DLT_TOPIC: transacoes-financeiras-processadas.DLT
     depends_on:
       - dynamodb
       - dynamodb-seed
@@ -34,6 +37,7 @@ services:
       AWS_DEFAULT_REGION: us-east-1
       DYNAMODB_ENDPOINT_URL: http://dynamodb:8000
       GREETING_TABLE_NAME: GreetingMessages
+      ACCOUNT_BALANCE_TABLE_NAME: AccountBalances
     volumes:
       - ./infra/dynamodb:/dynamodb-seed:ro
     entrypoint: ["/bin/bash", "/dynamodb-seed/seed.sh"]
@@ -75,9 +79,12 @@ services:
     environment:
       REDPANDA_BROKERS: redpanda:9092
       GREETING_TEMPLATES_TOPIC: greeting-templates
+      TRANSACTIONS_TOPIC: transacoes-financeiras-processadas
+      TRANSACTIONS_DLT_TOPIC: transacoes-financeiras-processadas.DLT
+      TRANSACTIONS_PARTITIONS: "6"
     volumes:
       - ./infra/redpanda:/redpanda-seed:ro
-    entrypoint: ["/bin/bash", "-c", "/redpanda-seed/config.sh && /redpanda-seed/seed.sh"]
+    entrypoint: ["/bin/bash", "-c", "tr -d '\\015' < /redpanda-seed/config.sh | /bin/bash && /bin/bash /redpanda-seed/seed.sh"]
 
   redpanda-console:
     image: docker.redpanda.com/redpandadata/console:v3.9.0

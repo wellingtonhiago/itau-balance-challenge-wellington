@@ -43,7 +43,7 @@ http: ## Call all .http files against the running app (no local deps, runs via D
 		node:20-alpine sh -c "npx --yes httpyac send hello.http --all -e docker"
 
 .PHONY: db-up
-db-up: ## Start DynamoDB Local + web console and (re)seed the GreetingMessages table
+db-up: ## Start DynamoDB Local + web console and (re)seed the GreetingMessages and AccountBalances tables
 	$(COMPOSE) up dynamodb dynamodb-seed dynamodb-admin -d
 
 .PHONY: db-seed
@@ -60,7 +60,7 @@ db-down: ## Stop DynamoDB Local + web console
 	$(COMPOSE) stop dynamodb dynamodb-seed dynamodb-admin
 
 .PHONY: kafka-up
-kafka-up: ## Start Redpanda + Console and (re)seed the greeting-templates topic
+kafka-up: ## Start Redpanda + Console and (re)seed the greeting-templates and transactions (+DLT) topics
 	$(COMPOSE) up redpanda redpanda-seed redpanda-console -d
 
 .PHONY: kafka-seed
