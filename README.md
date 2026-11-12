@@ -22,6 +22,7 @@
 
 ## Sumário
 
+- [Desafio: consulta de saldo](#desafio-consulta-de-saldo)
 - [Stack](#stack)
 - [Arquitetura](#arquitetura)
 - [Estrutura de pastas](#estrutura-de-pastas)
@@ -33,6 +34,124 @@
 - [Comandos do Makefile](#comandos-do-makefile)
 - [Testes](#testes)
 - [Cobertura de testes](#cobertura-de-testes)
+
+## Desafio: consulta de saldo
+
+Contexto `br.com.itau.challenge.balance`, ao lado do exemplo `hello` (que continua intacto). Consome eventos de transações processadas do Kafka, guarda o saldo mais recente de cada conta no DynamoDB e o expõe via `GET /balances/{accountId}`.
+
+```mermaid
+flowchart LR
+    Kafka(["Kafka / Redpanda<br/>transacoes-financeiras-processadas"]) --> Listener[TransactionProcessedListener]
+    Listener -- inválida --> DLT(["...processadas.DLT"])
+    Listener --> UpdateUC[UpdateAccountBalanceUseCase]
+    UpdateUC --> Provider[DynamoDbAccountBalanceDataProvider<br/>circuit breaker]
+    Provider -- escrita condicional --> DB[("DynamoDB<br/>AccountBalances")]
+
+    HTTP(["HTTP GET /balances/{accountId}"]) --> Controller[AccountBalanceController]
+    Controller --> GetUC[GetAccountBalanceUseCase]
+    GetUC --> Provider
+```
+
+### `GET /balances/{accountId}`
+
+```http
+GET /balances/5b19c8b6-0cc4-4c72-a989-0c2ee15fa975
+200 OK
+{"id":"5b19c8b6-0cc4-4c72-a989-0c2ee15fa975","owner":"315e3cfe-f4af-4cd2-b298-a449e614349a",
+ "balance":{"amount":183.12,"currency":"BRL"},"updated_at":"2025-07-04T12:02:44.589998-03:00"}
+```
+
+| Situação | Status |
+|-|-|
+| `accountId` não é UUID canônico | `400` (`application/problem+json`) |
+| Conta sem saldo gravado | `404` (`application/problem+json`) |
+| DynamoDB indisponível / circuito aberto | `503` + `Retry-After: 5` |
+| Método diferente de `GET` (exceto `HEAD` e `OPTIONS`, suportados pelo Spring MVC) | `405` |
+
+Exemplos prontos em [`http/balances.http`](http/balances.http). Para obter `200` no primeiro exemplo, publique antes um evento para a conta indicada; os seeds criam a tabela e os tópicos, mas não um saldo para essa conta.
+
+### Tópico `transacoes-financeiras-processadas` (entrada)
+
+- 6 partições; a **key** da mensagem deve ser o `account.id`, para manter a ordem por conta.
+- Ack manual, só depois da gravação no DynamoDB (*at-least-once*).
+- Payload inválido (JSON quebrado, campo ausente, UUID inválido, regra de domínio) vai direto para `transacoes-financeiras-processadas.DLT`, com o payload original e os headers da exceção.
+- DynamoDB indisponível: retry sem limite, com backoff exponencial de 500ms até 30s (a mensagem nunca é descartada). Erro inesperado: 3 tentativas e DLT.
+
+### Consistência
+
+O saldo do evento (`account.balance`) é a fonte da verdade; o serviço não soma transações. Cada escrita é condicional:
+
+```text
+attribute_not_exists(account_id) OR updated_at < :updatedAt
+OR (updated_at = :updatedAt AND last_transaction_id < :transactionId)
+```
+
+Assim, evento fora de ordem (`STALE`) ou repetido (`DUPLICATE`) não altera o saldo, sem precisar de tabela de deduplicação. A leitura usa `consistentRead`.
+
+### Resiliência e observabilidade
+
+- Cliente DynamoDB próprio: 2s por chamada, 500ms por tentativa, até 3 tentativas.
+- Circuit breaker `account-balance-storage` (Resilience4j) na leitura e na escrita; conta só falha de storage.
+- `/actuator/health` com o componente `accountBalanceStorage`; probes `/actuator/health/liveness` e `/actuator/health/readiness` (o DynamoDB fica fora da readiness de propósito).
+- `/actuator/prometheus`: `balance_transactions_processed_total{outcome}`, `balance_transactions_dead_lettered_total{exception}`, `balance_transactions_event_age_seconds`, `resilience4j_circuitbreaker_*`.
+- Logs ECS (JSON) com `LOGGING_STRUCTURED_FORMAT_CONSOLE=ecs`, com `kafka.topic/partition/offset`, `transaction.id` e `account.id` no MDC.
+- Imagem roda com o usuário `app` (uid 10001) e shutdown gracioso de 30s.
+
+### Variáveis de ambiente do saldo
+
+| Variável | Padrão | Descrição |
+|-|-|-|
+| `ACCOUNT_BALANCE_TABLE_NAME` | `AccountBalances` | tabela de saldos |
+| `TRANSACTIONS_TOPIC` / `TRANSACTIONS_DLT_TOPIC` | `transacoes-financeiras-processadas` / `transacoes-financeiras-processadas.DLT` | tópicos de entrada e DLT |
+| `TRANSACTIONS_CONSUMER_GROUP_ID` | `balance-transactions-consumer` | group id |
+| `TRANSACTIONS_CONSUMER_CONCURRENCY` | `6` | consumers (= partições) |
+| `TRANSACTIONS_RETRY_*` | `500ms`, `2.0`, `30s`, `3` | backoff e tentativas para erro inesperado |
+| `BALANCES_API_TIME_ZONE` | `America/Sao_Paulo` | fuso do `updated_at` |
+| `BALANCES_STORAGE_*` | `2s`, `500ms`, `3` | timeouts e tentativas do DynamoDB |
+| `BALANCES_STORAGE_CB_*` | `50`, `20`, `10`, `10s`, `3` | circuit breaker |
+| `MANAGEMENT_HEALTH_SHOW_DETAILS` | `always` | detalhes do health |
+| `LOGGING_STRUCTURED_FORMAT_CONSOLE` | (texto) | `ecs` para logs JSON |
+| `SHUTDOWN_TIMEOUT` | `30s` | shutdown gracioso |
+
+Com `DYNAMODB_ENDPOINT` vazio, o cliente do saldo usa a cadeia padrão de credenciais da AWS.
+
+### Testes do saldo
+
+- **Unitários:** domínio, casos de uso, mappers, listener, controller, health e métricas, com fakes e `kotlin.test`; `BalanceHexagonalArchitectureTest` garante que o domínio não depende de Spring, AWS, Kafka, Jackson nem Resilience4j.
+- **Integração:** `DynamoDbAccountBalanceIntegrationTest`, `TransactionProcessedListenerIntegrationTest`, `AccountBalanceApiIntegrationTest`, `ObservabilityIntegrationTest` e o E2E `BalanceEndToEndIntegrationTest` (Kafka → DynamoDB → HTTP real, com eventos antigo, duplicado e inválido).
+
+Com DynamoDB Local e Redpanda em execução e os seeds concluídos, execute no PowerShell:
+
+```powershell
+.\gradlew.bat 'integrationTest' '--console=plain'
+# Somente o fluxo ponta a ponta:
+.\gradlew.bat 'integrationTest' '--tests' '*BalanceEndToEndIntegrationTest' '--console=plain'
+```
+
+### Decisões
+
+| Decisão | Motivo |
+|-|-|
+| Saldo vem do evento, mais recente vence | evita recalcular e torna o processamento idempotente |
+| `APPROVED` e `DECLINED` processados | ambos trazem o saldo atual da conta |
+| Desempate por `transaction_id` no mesmo timestamp | ordem total e determinística |
+| Escrita condicional em vez de lock ou tabela de dedup | uma única chamada atômica ao DynamoDB |
+| Key = `account.id` + ack manual | ordem por conta e nenhuma perda em falha |
+| Retry infinito só para storage indisponível | falha transitória não pode mandar evento válido para a DLT |
+| DynamoDB fora da readiness | evita tirar todos os pods do balanceador ao mesmo tempo |
+| Arquitetura hexagonal com portas `*DataProvider` | domínio isolado e testável, seguindo o padrão do projeto |
+
+### Próximos passos
+
+- Reprocessamento da DLT e alarme sobre `balance_transactions_dead_lettered_total`.
+- Pausar o consumer enquanto o circuito estiver aberto, em vez de só aplicar backoff.
+- Tracing distribuído (Micrometer Tracing / OpenTelemetry) propagado pelos headers do Kafka.
+- Contrato do evento com Schema Registry (Avro/JSON Schema).
+- Autenticação/autorização na API (OAuth2/JWT) e rate limiting.
+- Testcontainers para os testes de integração rodarem sozinhos no CI.
+- Infra como código da tabela (PITR, backup, alarmes) e manifests com as probes.
+- Escala horizontal pelo lag do consumer group (ex.: KEDA) e mais partições.
+- Rejeitar ou sinalizar eventos com timestamp no futuro (relógio do produtor adiantado).
 
 ## Stack
 

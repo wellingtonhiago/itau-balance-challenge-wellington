@@ -1,5 +1,6 @@
 package br.com.itau.challenge.balance.adapter.output.dynamodb
 
+import br.com.itau.challenge.balance.adapter.output.dynamodb.config.BalanceStoragePropertiesFixtures.circuitBreaker
 import br.com.itau.challenge.balance.domain.exception.BalanceStorageUnavailableException
 import br.com.itau.challenge.balance.domain.model.BalanceFixtures.ACCOUNT_ID
 import br.com.itau.challenge.balance.domain.model.BalanceFixtures.TIMESTAMP_MICROS
@@ -10,17 +11,21 @@ import software.amazon.awssdk.services.dynamodb.model.ConditionalCheckFailedExce
 import software.amazon.awssdk.services.dynamodb.model.GetItemResponse
 import software.amazon.awssdk.services.dynamodb.model.ProvisionedThroughputExceededException
 import software.amazon.awssdk.services.dynamodb.model.ReturnValuesOnConditionCheckFailure
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException
+import io.github.resilience4j.circuitbreaker.CircuitBreaker
 import java.util.UUID
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertIs
 import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 class DynamoDbAccountBalanceDataProviderTest {
 
     private val client = FakeDynamoDbClient()
-    private val provider = DynamoDbAccountBalanceDataProvider(client, "AccountBalances")
+    private val circuitBreaker = circuitBreaker()
+    private val provider = DynamoDbAccountBalanceDataProvider(client, "AccountBalances", circuitBreaker)
 
     @Test
     fun `should find the balance with a strongly consistent read by account id`() {
@@ -99,6 +104,33 @@ class DynamoDbAccountBalanceDataProviderTest {
         val exception = assertFailsWith<BalanceStorageUnavailableException> { provider.saveIfNewer(accountBalance()) }
 
         assertEquals("Failed to save balance of account $ACCOUNT_ID in table 'AccountBalances'", exception.message)
+    }
+
+    @Test
+    fun `should open the circuit after repeated storage failures and stop calling DynamoDB`() {
+        client.onGetItem = { throw SdkClientException.create("connection refused") }
+        repeat(4) { assertFailsWith<BalanceStorageUnavailableException> { provider.findByAccountId(ACCOUNT_ID) } }
+
+        val exception = assertFailsWith<BalanceStorageUnavailableException> { provider.saveIfNewer(accountBalance()) }
+
+        assertEquals(CircuitBreaker.State.OPEN, circuitBreaker.state)
+        assertIs<CallNotPermittedException>(exception.cause)
+        assertEquals(
+            "Circuit breaker is open, skipped save balance of account $ACCOUNT_ID in table 'AccountBalances'",
+            exception.message,
+        )
+        assertEquals(4, client.getItemRequests.size)
+        assertTrue(client.putItemRequests.isEmpty())
+    }
+
+    @Test
+    fun `should not count rejected conditional writes as storage failures`() {
+        client.onPutItem = { throw ConditionalCheckFailedException.builder().message("condition failed").build() }
+
+        repeat(10) { provider.saveIfNewer(accountBalance()) }
+
+        assertEquals(CircuitBreaker.State.CLOSED, circuitBreaker.state)
+        assertEquals(0, circuitBreaker.metrics.numberOfFailedCalls)
     }
 
     private fun conditionFailedWithStored(item: Map<String, software.amazon.awssdk.services.dynamodb.model.AttributeValue>) =

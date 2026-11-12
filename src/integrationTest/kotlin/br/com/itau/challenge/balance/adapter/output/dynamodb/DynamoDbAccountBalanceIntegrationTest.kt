@@ -1,5 +1,6 @@
 package br.com.itau.challenge.balance.adapter.output.dynamodb
 
+import io.github.resilience4j.circuitbreaker.CircuitBreaker
 import br.com.itau.challenge.balance.domain.model.AccountBalance
 import br.com.itau.challenge.balance.domain.model.AccountStatus
 import br.com.itau.challenge.balance.domain.model.BalanceUpdateOutcome
@@ -37,7 +38,7 @@ class DynamoDbAccountBalanceIntegrationTest {
             .credentialsProvider(StaticCredentialsProvider.create(AwsBasicCredentials.create("local", "local"))) // TODO: credenciais cortadas na foto
             .build()
 
-    private val provider = DynamoDbAccountBalanceDataProvider(dynamoDbClient, tableName)
+    private val provider = DynamoDbAccountBalanceDataProvider(dynamoDbClient, tableName, CircuitBreaker.ofDefaults("account-balance-storage"))
 
     private val accountId: UUID = UUID.randomUUID()
 

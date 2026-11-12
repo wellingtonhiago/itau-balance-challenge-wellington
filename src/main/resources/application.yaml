@@ -1,6 +1,8 @@
 spring:
   application:
     name: itau-code-challange-starter-kit
+  lifecycle:
+    timeout-per-shutdown-phase: ${SHUTDOWN_TIMEOUT:30s}
   kafka:
     bootstrap-servers: ${KAFKA_BOOTSTRAP_SERVERS:localhost:19092}
     consumer:
@@ -20,4 +22,37 @@ greeting-templates:
 
 transactions:
   topic-name: ${TRANSACTIONS_TOPIC:transacoes-financeiras-processadas}
-  dlt-topic-name: ${TRANSACTIONS_DLT_TOPIC:transacoes-financeiras-processadas-dlt}
+  dlt-topic-name: ${TRANSACTIONS_DLT_TOPIC:transacoes-financeiras-processadas.DLT}
+  consumer:
+    group-id: ${TRANSACTIONS_CONSUMER_GROUP_ID:balance-transactions-consumer}
+    concurrency: ${TRANSACTIONS_CONSUMER_CONCURRENCY:6}
+  retry:
+    initial-interval: ${TRANSACTIONS_RETRY_INITIAL_INTERVAL:500ms}
+    multiplier: ${TRANSACTIONS_RETRY_MULTIPLIER:2.0}
+    max-interval: ${TRANSACTIONS_RETRY_MAX_INTERVAL:30s}
+    max-attempts-on-unexpected-error: ${TRANSACTIONS_RETRY_MAX_ATTEMPTS_ON_UNEXPECTED_ERROR:3}
+
+balances:
+  api:
+    time-zone: ${BALANCES_API_TIME_ZONE:America/Sao_Paulo}
+  storage:
+    api-call-timeout: ${BALANCES_STORAGE_API_CALL_TIMEOUT:2s}
+    api-call-attempt-timeout: ${BALANCES_STORAGE_API_CALL_ATTEMPT_TIMEOUT:500ms}
+    max-attempts: ${BALANCES_STORAGE_MAX_ATTEMPTS:3}
+    circuit-breaker:
+      failure-rate-threshold: ${BALANCES_STORAGE_CB_FAILURE_RATE_THRESHOLD:50}
+      sliding-window-size: ${BALANCES_STORAGE_CB_SLIDING_WINDOW_SIZE:20}
+      minimum-number-of-calls: ${BALANCES_STORAGE_CB_MINIMUM_NUMBER_OF_CALLS:10}
+      wait-duration-in-open-state: ${BALANCES_STORAGE_CB_WAIT_DURATION_IN_OPEN_STATE:10s}
+      permitted-calls-in-half-open-state: ${BALANCES_STORAGE_CB_PERMITTED_CALLS_IN_HALF_OPEN_STATE:3}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: ${MANAGEMENT_HEALTH_SHOW_DETAILS:always}
+      probes:
+        enabled: true

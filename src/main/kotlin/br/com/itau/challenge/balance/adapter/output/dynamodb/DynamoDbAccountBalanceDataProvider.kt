@@ -7,11 +7,15 @@ import br.com.itau.challenge.balance.adapter.output.dynamodb.AccountBalanceItemM
 import br.com.itau.challenge.balance.adapter.output.dynamodb.AccountBalanceItemMapper.string
 import br.com.itau.challenge.balance.adapter.output.dynamodb.AccountBalanceItemMapper.toDomain
 import br.com.itau.challenge.balance.adapter.output.dynamodb.AccountBalanceItemMapper.toItem
+import br.com.itau.challenge.balance.adapter.output.dynamodb.config.ACCOUNT_BALANCE_DYNAMODB_CLIENT
 import br.com.itau.challenge.balance.domain.exception.BalanceStorageUnavailableException
 import br.com.itau.challenge.balance.domain.model.AccountBalance
 import br.com.itau.challenge.balance.domain.model.BalanceUpdateOutcome
 import br.com.itau.challenge.balance.port.output.FindAccountBalanceDataProvider
 import br.com.itau.challenge.balance.port.output.SaveAccountBalanceDataProvider
+import io.github.resilience4j.circuitbreaker.CallNotPermittedException
+import io.github.resilience4j.circuitbreaker.CircuitBreaker
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.beans.factory.annotation.Value
 import org.springframework.stereotype.Component
 import software.amazon.awssdk.core.exception.SdkException
@@ -28,8 +32,9 @@ private const val ONLY_IF_NEWER_CONDITION =
 
 @Component
 class DynamoDbAccountBalanceDataProvider(
-    private val dynamoDbClient: DynamoDbClient,
+    @Qualifier(ACCOUNT_BALANCE_DYNAMODB_CLIENT) private val dynamoDbClient: DynamoDbClient,
     @Value("\${dynamodb.account-balance-table-name}") private val tableName: String,
+    private val circuitBreaker: CircuitBreaker,
 ) : FindAccountBalanceDataProvider,
     SaveAccountBalanceDataProvider {
 
@@ -79,11 +84,17 @@ class DynamoDbAccountBalanceDataProvider(
         return if (isSameTransaction) BalanceUpdateOutcome.DUPLICATE else BalanceUpdateOutcome.STALE
     }
 
-    private inline fun <T> translatingFailures(operation: String, block: () -> T): T = try {
-        block()
-    } catch (exception: ConditionalCheckFailedException) {
-        throw exception
-    } catch (exception: SdkException) {
-        throw BalanceStorageUnavailableException("Failed to $operation in table '$tableName'", exception)
+    private fun <T> translatingFailures(operation: String, block: () -> T): T = try {
+        circuitBreaker.executeSupplier {
+            try {
+                block()
+            } catch (exception: ConditionalCheckFailedException) {
+                throw exception
+            } catch (exception: SdkException) {
+                throw BalanceStorageUnavailableException("Failed to $operation in table '$tableName'", exception)
+            }
+        }
+    } catch (exception: CallNotPermittedException) {
+        throw BalanceStorageUnavailableException("Circuit breaker is open, skipped $operation in table '$tableName'", exception)
     }
 }

@@ -1,0 +1,26 @@
+### Balance of an account (publish an event to transacoes-financeiras-processadas first)
+GET {{host}}/balances/5b19c8b6-0cc4-4c72-a989-0c2ee15fa975
+Accept: application/json
+
+### Invalid account id should respond with a 400 problem detail
+GET {{host}}/balances/abc
+Accept: application/json
+
+### Account without balance should respond with a 404 problem detail
+GET {{host}}/balances/00000000-0000-0000-0000-000000000000
+Accept: application/json
+
+### Unsupported method should respond with 405
+POST {{host}}/balances/5b19c8b6-0cc4-4c72-a989-0c2ee15fa975
+
+### Health with the balance storage component
+GET {{host}}/actuator/health
+
+### Liveness probe
+GET {{host}}/actuator/health/liveness
+
+### Readiness probe
+GET {{host}}/actuator/health/readiness
+
+### Prometheus metrics (balance_transactions_*, resilience4j_circuitbreaker_*, http_server_requests_*)
+GET {{host}}/actuator/prometheus

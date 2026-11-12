@@ -12,6 +12,7 @@ class BalanceHexagonalArchitectureTest {
 
     private val domain = Layer("Domain", "..balance.domain..")
     private val port = Layer("Port", "..balance.port..")
+    private val application = Layer("Application", "..balance.application..")
     private val adapter = Layer("Adapter", "..balance.adapter..")
 
     @Test
@@ -19,7 +20,9 @@ class BalanceHexagonalArchitectureTest {
         scope.assertArchitecture {
             domain.dependsOnNothing()
             port.dependsOn(domain)
-            port.doesNotDependOn(adapter)
+            port.doesNotDependOn(application, adapter)
+            application.dependsOn(domain, port)
+            application.doesNotDependOn(adapter)
         }
     }
 
@@ -30,7 +33,7 @@ class BalanceHexagonalArchitectureTest {
 
     @Test
     fun `domain does not depend on frameworks or infrastructure`() {
-        val forbidden = listOf("org.springframework", "software.amazon", "org.apache.kafka", "t...") // TODO: lista cortada na foto
+        val forbidden = listOf("org.springframework", "software.amazon", "org.apache.kafka", "tools.jackson", "io.github.resilience4j")
 
         Konsist
             .scopeFromPackage("br.com.itau.challenge.balance.domain..")
