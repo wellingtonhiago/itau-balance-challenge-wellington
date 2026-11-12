@@ -1,0 +1,13 @@
+{
+  "status": "UP",
+  "components": {
+    "accountBalanceStorage": {
+      "status": "UP",
+      "details": {
+        "table": "AccountBalances",
+        "tableStatus": "ACTIVE",
+        "circuitBreaker": "CLOSED"
+      }
+    }
+  }
+}

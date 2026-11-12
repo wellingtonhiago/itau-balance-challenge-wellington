@@ -43,23 +43,29 @@ kotlin {
 	}
 }
 
-// Integration tests require live infrastructure (e.g. `make db-up`) and are intentionally
-// kept out of `test`/`check` so the default build stays infra-free and gate-friendly.
+// Balance integration tests start their own containers with Testcontainers; hello tests use Docker Compose.
+// Both are kept out of `test`/`check` so the default build stays infra-free.
 sourceSets {
 	create("integrationTest") {
 		kotlin.srcDir("src/integrationTest/kotlin")
-		resources.srcDir("src/integrationTest/resources")
 		compileClasspath += sourceSets.main.get().output + sourceSets.test.get().output
 		runtimeClasspath += sourceSets.main.get().output + sourceSets.test.get().output
 	}
 }
 
 configurations["integrationTestImplementation"].extendsFrom(configurations.testImplementation.get())
+
+dependencies {
+	"integrationTestImplementation"("org.springframework.boot:spring-boot-restclient")
+	"integrationTestImplementation"("org.springframework.boot:spring-boot-resttestclient")
+	"integrationTestImplementation"("org.testcontainers:testcontainers-redpanda")
+}
+
 configurations["integrationTestRuntimeOnly"].extendsFrom(configurations.testRuntimeOnly.get())
 
 val integrationTest =
 	tasks.register<Test>("integrationTest") {
-		description = "Runs integration tests against live infrastructure (start it first with `make db-up`)."
+		description = "Runs integration tests (Docker required; hello tests also require Docker Compose services)."
 		group = "verification"
 		testClassesDirs = sourceSets["integrationTest"].output.classesDirs
 		classpath = sourceSets["integrationTest"].runtimeClasspath

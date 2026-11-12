@@ -1,91 +1,100 @@
 package br.com.itau.challenge.balance.adapter.input.web
 
-import br.com.itau.challenge.balance.domain.model.AccountBalance
-import br.com.itau.challenge.balance.domain.model.AccountStatus
-import br.com.itau.challenge.balance.domain.model.EventTimestamp
-import br.com.itau.challenge.balance.domain.model.Money
+import br.com.itau.challenge.balance.adapter.output.dynamodb.config.ACCOUNT_BALANCE_DYNAMODB_CLIENT
+import br.com.itau.challenge.balance.builder.DomainObjectsBuilder.accountBalance
+import br.com.itau.challenge.balance.domain.model.BalanceFixtures
+import br.com.itau.challenge.balance.junit.StringResource
 import br.com.itau.challenge.balance.port.output.SaveAccountBalanceDataProvider
+import br.com.itau.challenge.balance.support.BalanceIntegrationTest
+import br.com.itau.challenge.balance.support.deleteAccountBalance
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
+import org.skyscreamer.jsonassert.JSONAssert
+import org.skyscreamer.jsonassert.JSONCompareMode
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.beans.factory.annotation.Value
-import org.springframework.boot.test.context.SpringBootTest
-import org.springframework.boot.webmvc.test.autoconfigure.AutoConfigureMockMvc
+import org.springframework.boot.resttestclient.TestRestTemplate
+import org.springframework.http.HttpStatus
 import org.springframework.http.MediaType
-import org.springframework.test.json.JsonCompareMode
-import org.springframework.test.web.servlet.MockMvc
-import org.springframework.test.web.servlet.get
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient
-import software.amazon.awssdk.services.dynamodb.model.AttributeValue
-import java.math.BigDecimal
 import java.util.UUID
+import kotlin.test.assertEquals
+import kotlin.test.assertTrue
 
-/**
- * Serves `GET /balances/{accountId}` from the real application context backed by DynamoDB Local
- * (see `make db-up`). Run explicitly with `./gradlew integrationTest`.
- */
-@SpringBootTest
-@AutoConfigureMockMvc
-class AccountBalanceApiIntegrationTest {
-
-    @Autowired
-    private lateinit var mockMvc: MockMvc
-
-    @Autowired
-    private lateinit var saveAccountBalanceDataProvider: SaveAccountBalanceDataProvider
-
-    @Autowired
-    private lateinit var dynamoDbClient: DynamoDbClient
-
-    @Value("\${dynamodb.account-balance-table-name}")
-    private lateinit var tableName: String
-
-    private val accountId: UUID = UUID.randomUUID()
+/** Calls `GET /balances/{accountId}` over HTTP against the application backed by DynamoDB Local. */
+@BalanceIntegrationTest
+class AccountBalanceApiIntegrationTest @Autowired constructor(
+    private val testRestTemplate: TestRestTemplate,
+    private val saveAccountBalanceDataProvider: SaveAccountBalanceDataProvider,
+    @Qualifier(ACCOUNT_BALANCE_DYNAMODB_CLIENT) private val dynamoDbClient: DynamoDbClient,
+    @Value("\${dynamodb.account-balance-table-name}") private val tableName: String,
+) {
 
     @AfterEach
-    fun tearDown() {
-        dynamoDbClient.deleteItem { request ->
-            request.tableName(tableName).key(mapOf("account_id" to AttributeValue.fromS(accountId.toString())))
-        }
+    fun tearDown() = dynamoDbClient.deleteAccountBalance(tableName, BalanceFixtures.ACCOUNT_ID)
+
+    @Test
+    fun `should return the balance stored in DynamoDB`(
+        @StringResource("http/response/get-balance-200.json") expectedResponse: String,
+    ) {
+        // Given
+        saveAccountBalanceDataProvider.saveIfNewer(accountBalance())
+
+        // When
+        val response = testRestTemplate.getForEntity("/balances/${BalanceFixtures.ACCOUNT_ID}", String::class.java)
+
+        // Then
+        assertEquals(HttpStatus.OK, response.statusCode)
+        assertTrue(MediaType.APPLICATION_JSON.isCompatibleWith(response.headers.contentType))
+        JSONAssert.assertEquals(expectedResponse, response.body, JSONCompareMode.STRICT)
     }
 
     @Test
-    fun `should return the balance stored in DynamoDB`() {
-        val ownerId = UUID.randomUUID()
-        saveAccountBalanceDataProvider.saveIfNewer(
-            AccountBalance(
-                accountId = accountId,
-                ownerId = ownerId,
-                balance = Money.of(BigDecimal("-10.50"), "BRL"),
-                status = AccountStatus("ENABLED"),
-                updatedAt = EventTimestamp(1_751_641_364_589_998L),
-                lastTransactionId = UUID.randomUUID(),
-            ),
-        )
+    fun `should return a negative balance stored in DynamoDB`(
+        @StringResource("http/response/get-balance-negative-200.json") expectedResponse: String,
+    ) {
+        // Given
+        saveAccountBalanceDataProvider.saveIfNewer(accountBalance(amount = "-10.50"))
 
-        mockMvc.get("/balances/$accountId").andExpect {
-            status { isOk() }
-            content {
-                json(
-                    """
-                    {
-                      "id": "$accountId",
-                      "owner": "$ownerId",
-                      "balance": {"amount": -10.50, "currency": "BRL"},
-                      "updated_at": "2025-07-04T12:02:44.589998-03:00"
-                    }
-                    """,
-                    JsonCompareMode.STRICT,
-                )
-            }
-        }
+        // When
+        val response = testRestTemplate.getForEntity("/balances/${BalanceFixtures.ACCOUNT_ID}", String::class.java)
+
+        // Then
+        assertEquals(HttpStatus.OK, response.statusCode)
+        assertTrue(MediaType.APPLICATION_JSON.isCompatibleWith(response.headers.contentType))
+        JSONAssert.assertEquals(expectedResponse, response.body, JSONCompareMode.STRICT)
     }
 
     @Test
-    fun `should answer 404 for an account without balance`() {
-        mockMvc.get("/balances/$accountId").andExpect {
-            status { isNotFound() }
-            content { contentType(MediaType.APPLICATION_PROBLEM_JSON) }
-        }
+    fun `should answer 404 for an account without balance`(
+        @StringResource("http/response/get-balance-404.json") expectedResponse: String,
+    ) {
+        // Given
+        val accountWithoutBalance = UUID.randomUUID()
+
+        // When
+        val response = testRestTemplate.getForEntity("/balances/$accountWithoutBalance", String::class.java)
+
+        // Then
+        assertEquals(HttpStatus.NOT_FOUND, response.statusCode)
+        assertTrue(MediaType.APPLICATION_PROBLEM_JSON.isCompatibleWith(response.headers.contentType))
+        JSONAssert.assertEquals(expectedResponse, response.body, JSONCompareMode.LENIENT)
+    }
+
+    @Test
+    fun `should answer 400 when the account id is not a UUID`(
+        @StringResource("http/response/get-balance-400.json") expectedResponse: String,
+    ) {
+        // Given
+        val invalidAccountId = "abc"
+
+        // When
+        val response = testRestTemplate.getForEntity("/balances/$invalidAccountId", String::class.java)
+
+        // Then
+        assertEquals(HttpStatus.BAD_REQUEST, response.statusCode)
+        assertTrue(MediaType.APPLICATION_PROBLEM_JSON.isCompatibleWith(response.headers.contentType))
+        JSONAssert.assertEquals(expectedResponse, response.body, JSONCompareMode.LENIENT)
     }
 }

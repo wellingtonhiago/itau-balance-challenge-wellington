@@ -22,6 +22,39 @@ flowchart LR
 
 **Fluxo de leitura:** `GET /balances/{accountId}` consulta o saldo armazenado e retorna os dados da conta.
 
+## Estrutura do projeto
+
+Árvore resumida, com foco no módulo de saldos:
+
+```text
+src/
+├── main/
+│   ├── kotlin/br/com/itau/challenge/balance/
+│   │   ├── domain/            # Modelos e exceções de domínio
+│   │   ├── application/       # Casos de uso
+│   │   ├── port/
+│   │   │   ├── input/         # Contratos dos casos de uso
+│   │   │   └── output/        # Contratos para acesso a dados
+│   │   └── adapter/
+│   │       ├── input/         # Entradas HTTP e Kafka
+│   │       └── output/        # Persistência DynamoDB
+│   └── resources/
+│       └── application.yaml   # Configuração da aplicação
+├── test/kotlin/               # Testes unitários e de arquitetura
+└── integrationTest/
+    ├── kotlin/               # Testes, builders, infra e suporte
+    └── resources/            # payload/ e http/response/ com JSONs
+infra/
+├── dynamodb/                  # Seed e dados auxiliares
+└── redpanda/                  # Configuração, seeds e produtores
+http/                          # Exemplos de chamadas à API
+build.gradle.kts               # Build e configuração dos testes
+Dockerfile                     # Imagem da aplicação
+docker-compose.yml             # Aplicação e serviços locais
+```
+
+O domínio concentra regras e modelos; `application` implementa os casos de uso; `port/input` e `port/output` definem os contratos; e `adapter/input` e `adapter/output` conectam esses contratos a HTTP, Kafka e DynamoDB. Os testes ficam separados entre execução unitária/arquitetural e integração.
+
 ## Abordagens
 
 - A escrita condicional mantém apenas o evento mais recente; eventos antigos ou duplicados não sobrescrevem o saldo atual.
@@ -110,7 +143,15 @@ Testes unitários e de arquitetura, incluindo o gate global de pelo menos 90% de
 .\gradlew.bat check --console=plain
 ```
 
-Os testes de integração usam DynamoDB Local e Redpanda reais. Suba os serviços e aguarde os seeds como na seção anterior; depois execute:
+Os testes de integração de saldo usam DynamoDB Local e Redpanda reais, iniciados automaticamente pelo Testcontainers. Precisam apenas do Docker em execução, sem Compose ou seeds:
+
+```powershell
+.\gradlew.bat integrationTest --tests 'br.com.itau.challenge.balance.*' --console=plain
+```
+
+As cinco classes compartilham um contexto Spring com `@BalanceIntegrationTest`, tag `integration` e HTTP real em porta aleatória. Os eventos e respostas esperadas ficam em `src/integrationTest/resources`, carregados por `@StringResource`; os builders criam variações de eventos e objetos de domínio.
+
+Para executar **todos** os testes de integração, incluindo os legados de `hello`, suba os serviços e aguarde os seeds como na seção anterior; depois execute:
 
 ```powershell
 .\gradlew.bat integrationTest --console=plain
@@ -124,6 +165,8 @@ Para executar somente o fluxo Kafka → DynamoDB → HTTP:
 
 O relatório JaCoCo fica em `build/reports/jacoco/test/html/index.html`.
 
+`check` não executa `integrationTest`. O gate de cobertura é global: filtrar testes não filtra as classes medidas pelo JaCoCo.
+
 ## Tecnologias
 
-Kotlin, Java 21, Spring Boot, Gradle, Kafka/Redpanda, DynamoDB, Docker Compose, JUnit 5 e JaCoCo.
+Kotlin, Java 21, Spring Boot, Gradle, Kafka/Redpanda, DynamoDB, Docker Compose, Testcontainers, JUnit 5 e JaCoCo.

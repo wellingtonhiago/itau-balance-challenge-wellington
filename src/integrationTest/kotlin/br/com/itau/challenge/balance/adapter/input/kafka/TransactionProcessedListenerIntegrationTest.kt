@@ -1,23 +1,29 @@
 package br.com.itau.challenge.balance.adapter.input.kafka
 
 import br.com.itau.challenge.balance.adapter.input.kafka.config.TransactionsKafkaProperties
+import br.com.itau.challenge.balance.adapter.output.dynamodb.config.ACCOUNT_BALANCE_DYNAMODB_CLIENT
+import br.com.itau.challenge.balance.builder.INVALID_JSON
+import br.com.itau.challenge.balance.builder.PayloadObjectsBuilder.transactionProcessedEvent
 import br.com.itau.challenge.balance.domain.model.AccountBalance
+import br.com.itau.challenge.balance.junit.StringResource
 import br.com.itau.challenge.balance.port.output.FindAccountBalanceDataProvider
+import br.com.itau.challenge.balance.support.BalanceIntegrationTest
+import br.com.itau.challenge.balance.support.deleteAccountBalance
 import br.com.itau.challenge.balance.support.eventually
+import io.micrometer.core.instrument.MeterRegistry
 import org.apache.kafka.clients.consumer.ConsumerConfig
 import org.apache.kafka.clients.consumer.ConsumerRecord
 import org.junit.jupiter.api.AfterEach
 import org.junit.jupiter.api.Test
-import io.micrometer.core.instrument.MeterRegistry
 import org.springframework.beans.factory.annotation.Autowired
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.beans.factory.annotation.Value
-import org.springframework.boot.test.context.SpringBootTest
 import org.springframework.kafka.core.ConsumerFactory
 import org.springframework.kafka.core.KafkaTemplate
 import software.amazon.awssdk.services.dynamodb.DynamoDbClient
-import software.amazon.awssdk.services.dynamodb.model.AttributeValue
 import java.math.BigDecimal
 import java.time.Duration
+import java.util.Properties
 import java.util.UUID
 import kotlin.test.assertEquals
 import kotlin.test.assertNotNull
@@ -25,81 +31,66 @@ import kotlin.test.assertNotNull
 private const val BASE_TIMESTAMP = 1_751_641_364_589_998L
 private const val PARTITION = 0
 
-/**
- * Boots the real application against the Redpanda and DynamoDB Local containers
- * (see `make db-up kafka-up`) and drives the transactions topic end to end.
- * Run explicitly with `./gradlew integrationTest`.
- */
-@SpringBootTest
-class TransactionProcessedListenerIntegrationTest {
-
-    @Autowired
-    private lateinit var meterRegistry: MeterRegistry
-
-    @Autowired
-    private lateinit var kafkaTemplate: KafkaTemplate<String, String>
-
-    @Autowired
-    private lateinit var consumerFactory: ConsumerFactory<String, String>
-
-    @Autowired
-    private lateinit var findAccountBalanceDataProvider: FindAccountBalanceDataProvider
-
-    @Autowired
-    private lateinit var properties: TransactionsKafkaProperties
-
-    @Autowired
-    private lateinit var dynamoDbClient: DynamoDbClient
-
-    @Value("\${dynamodb.account-balance-table-name}")
-    private lateinit var tableName: String
+/** Drives the real listener through the transactions topic on Redpanda, persisting into DynamoDB Local. */
+@BalanceIntegrationTest
+class TransactionProcessedListenerIntegrationTest @Autowired constructor(
+    private val meterRegistry: MeterRegistry,
+    private val kafkaTemplate: KafkaTemplate<String, String>,
+    private val consumerFactory: ConsumerFactory<String, String>,
+    private val findAccountBalanceDataProvider: FindAccountBalanceDataProvider,
+    private val properties: TransactionsKafkaProperties,
+    @Qualifier(ACCOUNT_BALANCE_DYNAMODB_CLIENT) private val dynamoDbClient: DynamoDbClient,
+    @Value("\${dynamodb.account-balance-table-name}") private val tableName: String,
+) {
 
     private val accountId: UUID = UUID.randomUUID()
     private val createdAccounts = mutableListOf(accountId)
 
     @AfterEach
-    fun tearDown() {
-        createdAccounts.forEach { id ->
-            dynamoDbClient.deleteItem { request ->
-                request.tableName(tableName).key(mapOf("account_id" to AttributeValue.fromS(id.toString())))
-            }
-        }
-    }
+    fun tearDown() = createdAccounts.forEach { dynamoDbClient.deleteAccountBalance(tableName, it) }
 
     @Test
     fun `should persist the balance carried by a published event`() {
+        // Given
         val transactionId = UUID.randomUUID()
 
+        // When
         publish(event(transactionId, BASE_TIMESTAMP, balance = "183.12"))
 
+        // Then
         val stored = awaitBalance { it.lastTransactionId == transactionId }
         assertEquals(BigDecimal("183.12"), stored.balance.amount)
     }
 
     @Test
     fun `should keep the newest balance when events arrive out of order or duplicated`() {
+        // Given
         val newest = UUID.randomUUID()
         val newestEvent = event(newest, BASE_TIMESTAMP + 2, balance = "300.00")
 
+        // When
         publish(newestEvent)
         publish(event(UUID.randomUUID(), BASE_TIMESTAMP + 1, balance = "200.00"))
         publish(newestEvent)
         publish(event(UUID.randomUUID(), BASE_TIMESTAMP, balance = "100.00"))
         awaitPartitionDrained()
 
+        // Then
         val stored = assertNotNull(findAccountBalanceDataProvider.findByAccountId(accountId))
         assertEquals(newest, stored.lastTransactionId)
         assertEquals(BigDecimal("300.00"), stored.balance.amount)
     }
 
     @Test
-    fun `should route malformed and invalid messages to the DLT`() {
-        val malformed = "{not-json $accountId"
+    fun `should route malformed and invalid messages to the DLT`(@StringResource(INVALID_JSON) malformed: String) {
+        // Given
         val invalid = event(UUID.randomUUID(), BASE_TIMESTAMP, balance = "1.00", currency = "XYZ")
 
+        // When
         publish(malformed)
         publish(invalid)
 
+        // Then
         val deadLetters = awaitDeadLetters(count = 2)
         assertEquals(setOf(malformed, invalid), deadLetters.map { it.value() }.toSet())
         assertEquals(
@@ -119,28 +110,17 @@ class TransactionProcessedListenerIntegrationTest {
         }
     }
 
-    private fun publish(payload: String) {
-        kafkaTemplate.send(properties.topicName, PARTITION, accountId.toString(), payload).get()
+    private fun publish(payload: String, key: UUID = accountId) {
+        kafkaTemplate.send(properties.topicName, PARTITION, key.toString(), payload).get()
     }
 
     private fun event(transactionId: UUID, timestamp: Long, balance: String, currency: String = "BRL") =
-        """
-        {
-          "transaction": {"id": "$transactionId", "type": "CREDIT", "amount": 1.00, "currency": "$currency",
-                          "status": "APPROVED", "timestamp": $timestamp},
-          "account": {"id": "$accountId", "owner": "${UUID.randomUUID()}", "created_at": "1634874339",
-                      "status": "ENABLED", "balance": {"amount": $balance, "currency": "BRL"}}
-        }
-        """.trimIndent()
+        transactionProcessedEvent(accountId, transactionId, timestamp, balance, currency)
 
     /** Records of a partition are consumed in order: once a sentinel published last is stored, all previous were processed. */
     private fun awaitPartitionDrained() {
         val sentinelAccountId = UUID.randomUUID().also(createdAccounts::add)
-        val sentinel = event(UUID.randomUUID(), BASE_TIMESTAMP, balance = "0.00").replace(
-            accountId.toString(),
-            sentinelAccountId.toString(),
-        )
-        kafkaTemplate.send(properties.topicName, PARTITION, sentinelAccountId.toString(), sentinel).get()
+        publish(transactionProcessedEvent(sentinelAccountId, UUID.randomUUID(), BASE_TIMESTAMP, "0.00"), key = sentinelAccountId)
         eventually { findAccountBalanceDataProvider.findByAccountId(sentinelAccountId) }
     }
 
@@ -148,9 +128,7 @@ class TransactionProcessedListenerIntegrationTest {
         eventually { findAccountBalanceDataProvider.findByAccountId(accountId)?.takeIf(condition) }
 
     private fun awaitDeadLetters(count: Int): List<ConsumerRecord<String, String>> {
-        val overrides = java.util.Properties().apply {
-            put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest")
-        }
+        val overrides = Properties().apply { put(ConsumerConfig.AUTO_OFFSET_RESET_CONFIG, "earliest") }
         consumerFactory.createConsumer("dlt-verifier-${UUID.randomUUID()}", null, null, overrides).use { consumer ->
             consumer.subscribe(listOf(properties.dltTopicName))
             val received = mutableListOf<ConsumerRecord<String, String>>()
